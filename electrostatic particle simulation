@@ -1,0 +1,1033 @@
+c * * * periodic 2d electrostatic particle simulation kernel code * * *
+      program beps2k
+      implicit double precision (a-h,o-z)
+	complex*16 qc,fxc,fyc,sct
+      parameter(nss=2,indx=8,indy=8,idimp=3,idimv=5)
+	parameter(nx=2**indx,ny=2**indy,nxh=nx/2,nyh=ny/2)
+	parameter(npx=10*nx, npy=10*ny, np=npx*npy)
+      parameter(tend = 3000.000D0, dt = .02D0)
+      parameter(nxv=nx+2,nxvh=nxv/2)
+      parameter(nmx=nx*(ny/nx)+ny*(nx/ny),nxy=nmx/(2-nx/nmx-ny/nmx))
+      parameter(nxyh=nxy/2,nmxh=nxh*(ny/nxh)+ny*(nxh/ny))
+      parameter(nxhy=nmxh/(2-nxh/nmxh-ny/nmxh))
+      parameter(nloop=tend/dt+.0001D0)
+      dimension part(idimv,np,nss),parti(idimv,np)
+	dimension vbe(idimp,nss),vte(idimp,nss),dns(nss)
+	dimension vbi(idimp),vti(idimp)
+      dimension q(nxv,ny),qs(nxv,ny,nss),fx(nxv,ny),fy(nxv,ny)
+      dimension qc(nxvh,ny), fxc(nxvh,ny), fyc(nxvh,ny)
+      dimension ffc(nxv,nyh)
+      dimension mixup(nxhy), sct(nxyh)
+      equivalence (qc(1,1),q(1,1)),(fxc(1,1),fx(1,1)),(fyc(1,1),fy(1,1))
+      data vbe/10.0d0,0.d0,0.d0,0.0d0,0.0d0,0.0d0/
+	data vte/1.d0,1.d0,1.d0, 1.d0,1.d0,1.d0/
+	data vbi/0.0d0,0.0d0,0.0d0/
+	data vti/0.0233d0,0.0233d0,0.0233d0/
+	data dns/0.02d0,0.98d0/
+c ax/ay = half-width of particle in x/y direction
+      data qme,ax,ay,bx0,by0/-1.0d0,.866667D0,.866667D0,1.0d0,0.0d0/
+	data qmi/0.000545d0/
+      open(unit=8,file='ene.dat',status='unknown')
+	open(unit=9,file='ee.dat',status='unknown')
+	open(unit=10,file='eleb.dat',status='unknown')
+	open(unit=11,file='elep.dat',status='unknown')
+c initialize constants
+      itime = 0
+      affp = dfloat(nx*ny)/dfloat(np)
+	qi0=-qme/affp
+c prepare fft tables
+      isign = 0
+      call fft2rx(qc,isign,mixup,sct,indx,indy,nxvh,ny,nxhy,nxyh)
+c calculate form factors
+      call pois2 (q,fx,fy,isign,ffc,ax,ay,affp,we,nx,ny,nxv,nyh)
+c initialize density profile and velocity distribution
+c background electrons
+      call distr2(part,nss,idimp,idimv,vbe,vte,npx,npy,np,nx,ny)
+	call distri(parti,idimp,idimv,vbi,vti,npx,npy,np,nx,ny)
+      do 120 k = 1, ny
+         do 110 j = 1, nx
+	      q(j,k)=0.0d0
+  110    continue
+  120 continue
+
+c deposit charge for initial distribution
+      call dposti(parti,q,np,idimp,idimv,nx,ny,nxv)
+      call dpost2(part,q,qs,dns,qme,np,nss,idimp,idimv,nx,ny,nxv)
+c add background ion density
+c
+c * * * start main iteration loop * * *
+c
+  500 if (nloop.le.itime) go to 2000
+c transform charge to fourier space
+      isign = -1
+      call fft2rx(qc,isign,mixup,sct,indx,indy,nxvh,ny,nxhy,nxyh)
+c calculate force/charge in fourier space
+      call pois2(q,fx,fy,isign,ffc,ax,ay,affp,we,nx,ny,nxv,nyh)
+c transform force/charge to real space
+      isign = 1
+      call fft2rx(fxc,isign,mixup,sct,indx,indy,nxvh,ny,nxhy,nxyh)
+      call fft2rx(fyc,isign,mixup,sct,indx,indy,nxvh,ny,nxhy,nxyh)
+c particle push and charge density update
+c initialize charge density to background
+      do 1240 k = 1, ny
+         do 1230 j = 1, nx
+            q(j,k)=0.0d0
+ 1230    continue
+ 1240 continue
+      wx=0.0d0
+	wy=0.0d0
+      do 1250 i=1,nx
+	   do 1260 j=1,ny
+	      wx=wx+fx(i,j)**2
+	      wy=wy+fy(i,j)**2
+1260     continue
+1250  continue
+      wx=wx/dfloat(nx*ny)
+	wy=wy/dfloat(nx*ny)
+c push particles
+      call pushi(parti,fx,fy,bx0,by0,qmi,dt,idimp,idimv,
+     &                  np,nx,ny,nxv,eki)
+      call push2(part,fx,fy,dns,nss,bx0,by0,qme,dt,
+     &           idimp,idimv,np,nx,ny,nxv,eke)
+	eki=eki/qmi
+	ek=eke+eki
+c deposit charge     
+      call dpost2(part,q,qs,dns,qme,np,nss,idimp,idimv,nx,ny,nxv)
+      call dposti(parti,q,np,idimp,idimv,nx,ny,nxv)
+c energy diagnostic
+      wt = we + ek
+	write(*,*)itime,we,ek,eke,eki,wt
+      write (8,'(1x,I8,6F10.5)')itime,we,wx,wy,eke,eki,wt
+	if(mod(itime,1000).eq.0) then
+	  do i=1,nx
+	     do j=1,ny
+	        write(9,'(1x,2I8,3F15.7)')i-1,j-1,q(i,j),fx(i,j),fy(i,j)
+	     enddo
+	  enddo
+	endif
+	if(itime.eq.45000) then
+	  do i=1,np
+	     write(10,'(1x,5F13.6)') (part(k,i,1),k=1,5)
+	     write(11,'(1x,5F13.6)') (part(k,i,2),k=1,5)
+	  enddo
+	endif
+      itime = itime + 1
+      go to 500
+ 2000 continue
+c
+c * * * end main iteration loop * * *
+c
+      stop
+      end
+
+
+      subroutine distr2(part,nss,idimp,idimv,vbe,vte,npx,npy,nop,nx,ny)
+c for 2d code, this subroutine calculates initial particle co-ordinates
+c and velocities with uniform density and maxwellian velocity with drift
+c part(1,n) = position x of particle n
+c part(2,n) = position y of particle n
+c part(3,n) = velocity vx of particle n
+c part(4,n) = velocity vy of particle n
+c npx/npy = initial number of particles distributed in x/y direction
+c np = number of particles
+c nx/ny = system length in x/y direction
+c ranorm = gaussian random number with zero mean and unit variance
+      implicit double precision (a-h,o-z)
+      dimension part(idimv,nop,nss),vbe(idimp,nss),vte(idimp,nss)
+      at1 = dfloat(nx)/dfloat(npx)
+      at2 = dfloat(ny)/dfloat(npy)
+c uniform density profile
+	do 100 kk=1,nss
+         do 20 k = 1, npy
+            k1 = npx*(k - 1)
+            at3 = at2*(dfloat(k) - .5D0)
+            do 10 j = 1, npx
+               part(1,j+k1,kk) = at1*(dfloat(j) - .5D0)
+               part(2,j+k1,kk) = at3
+   10       continue
+   20    continue
+c maxwellian velocity distribution
+         do 30 j = 1, nop
+            part(3,j,kk) = vte(1,kk)*ranorm(d)
+            part(4,j,kk) = vte(2,kk)*ranorm(d)
+	      part(5,j,kk) = vte(3,kk)*ranorm(d)
+   30    continue
+c add correct drift
+         sum1 = 0.0D0
+         sum2 = 0.0D0
+	   sum3 = 0.0d0
+         do 40 j = 1, nop
+            sum1 = sum1 + part(3,j,kk)
+            sum2 = sum2 + part(4,j,kk)
+	      sum3 = sum3 + part(5,j,kk)
+   40    continue
+         at4 = 1.0D0/dfloat(nop)
+         sum1 = at4*sum1 - vbe(1,kk)
+         sum2 = at4*sum2 - vbe(2,kk)
+	   sum3 = at4*sum3 - vbe(3,kk)
+         do 50 j = 1, nop
+            part(3,j,kk) = part(3,j,kk) - sum1
+            part(4,j,kk) = part(4,j,kk) - sum2
+	      part(5,j,kk) = part(5,j,kk) - sum3
+   50    continue
+  100 continue
+      return
+      end
+
+
+      subroutine distri(part,idimp,idimv,vbi,vti,npx,npy,nop,nx,ny)
+c for 2d code, this subroutine calculates initial particle co-ordinates
+c and velocities with uniform density and maxwellian velocity with drift
+c part(1,n) = position x of particle n
+c part(2,n) = position y of particle n
+c part(3,n) = velocity vx of particle n
+c part(4,n) = velocity vy of particle n
+c npx/npy = initial number of particles distributed in x/y direction
+c np = number of particles
+c nx/ny = system length in x/y direction
+c ranorm = gaussian random number with zero mean and unit variance
+      implicit double precision (a-h,o-z)
+      dimension part(idimv,nop),vbi(idimp),vti(idimp)
+      at1 = dfloat(nx)/dfloat(npx)
+      at2 = dfloat(ny)/dfloat(npy)
+c uniform density profile
+      do 20 k = 1, npy
+         k1 = npx*(k - 1)
+         at3 = at2*(dfloat(k) - .5D0)
+         do 10 j = 1, npx
+            part(1,j+k1) = at1*(dfloat(j) - .5D0)
+            part(2,j+k1) = at3
+   10    continue
+   20 continue
+c maxwellian velocity distribution
+      do 30 j = 1, nop
+         part(3,j) = vti(1)*ranorm(d)
+         part(4,j) = vti(2)*ranorm(d)
+	   part(5,j) = vti(3)*ranorm(d)
+   30 continue
+c add correct drift
+      sum1 = 0.0D0
+      sum2 = 0.0D0
+	sum3 = 0.0d0
+      do 40 j = 1, nop
+         sum1 = sum1 + part(3,j)
+         sum2 = sum2 + part(4,j)
+	   sum3 = sum3 + part(5,j)
+   40 continue
+      at4 = 1.0D0/dfloat(nop)
+      sum1 = at4*sum1 - vbi(1)
+      sum2 = at4*sum2 - vbi(2)
+	sum3 = at4*sum3 - vbi(3)
+      do 50 j = 1, nop
+         part(3,j) = part(3,j) - sum1
+         part(4,j) = part(4,j) - sum2
+	   part(5,j) = part(5,j) - sum3
+   50 continue
+      return
+      end
+
+
+
+
+      subroutine dpost2(part,q,qs,dns,qm,nop,nss,idimp,idimv,nx,ny,nxv)
+c for 2d code, this subroutine calculates particle charge density
+c using second-order spline interpolation, periodic boundaries
+c charge density is approximated by values at the nearest grid points
+c q(n,m)=qm*(.75-dx**2)*(.75-dy**2)
+c q(n+1,m)=.5*qm*((.5+dx)**2)*(.75-dy**2)
+c q(n-1,m)=.5*qm*((.5-dx)**2)*(.75-dy**2)
+c q(n,m+1)=.5*qm*(.75-dx**2)*(.5+dy)**2
+c q(n+1,m+1)=.25*qm*((.5+dx)**2)*(.5+dy)**2
+c q(n-1,m+1)=.25*qm*((.5-dx)**2)*(.5+dy)**2
+c q(n,m-1)=.5*qm*(.75-dx**2)*(.5-dy)**2
+c q(n+1,m-1)=.25*qm*((.5+dx)**2)*(.5-dy)**2
+c q(n-1,m-1)=.25*qm*((.5-dx)**2)*(.5-dy)**2
+c where n,m = nearest grid points and dx = x-n, dy = y-m
+c part(1,n) = position x of particle n
+c part(2,n) = position y of particle n
+c q(j,k) = charge density at grid point j,k
+c qm = charge on particle, in units of e
+c nop = number of particles
+c nx/ny = system length in x/y direction
+c nxv = first dimension of field arrays, must be >= nx
+c scalar version
+      implicit double precision (a-h,o-z)
+      dimension part(idimv,nop,nss),q(nxv,ny)
+	dimension dns(nss),qs(nxv,ny,nss)
+c find interpolation weights
+	do 100 kk=1,nss
+	   do 200 j=1,ny
+	      do 300 i=1,nxv
+	         qs(i,j,kk)=0.0d0
+300         continue
+200      continue
+         do 10 j = 1, nop
+            nn = part(1,j,kk) + .5D0
+            dxl = part(1,j,kk) - dfloat(nn)
+            nn = nn + 1
+            if (nn.gt.nx) nn = nn - nx
+            amx = .75D0 - dxl*dxl
+            np = nn + 1
+            if (np.gt.nx) np = np - nx
+            dxp = .5D0*(.5D0 + dxl)**2
+            nl = nn - 1
+            if (nl.lt.1) nl = nl + nx
+            dxl = .5D0*(.5D0 - dxl)**2
+            mm = part(2,j,kk) + .5D0
+            dyl = part(2,j,kk) - dfloat(mm)
+            mm = mm + 1
+            if (mm.gt.ny) mm = mm - ny
+            amy = .75D0 - dyl*dyl
+            mp = mm + 1
+            if (mp.gt.ny) mp = mp - ny
+            dyp = .5D0*(.5D0 + dyl)**2
+            ml = mm - 1
+            if (ml.lt.1) ml = ml + ny
+            dyl = .5D0*(.5D0 - dyl)**2
+c deposit charge
+            qs(nn,mm,kk) = qs(nn,mm,kk) + amx*amy
+            qs(np,mm,kk) = qs(np,mm,kk) + dxp*amy
+            qs(nl,mm,kk) = qs(nl,mm,kk) + dxl*amy
+            qs(nn,mp,kk) = qs(nn,mp,kk) + amx*dyp
+            qs(np,mp,kk) = qs(np,mp,kk) + dxp*dyp
+            qs(nl,mp,kk) = qs(nl,mp,kk) + dxl*dyp
+            qs(nn,ml,kk) = qs(nn,ml,kk) + amx*dyl
+            qs(np,ml,kk) = qs(np,ml,kk) + dxp*dyl
+            qs(nl,ml,kk) = qs(nl,ml,kk) + dxl*dyl
+   10    continue
+         do 400 j=1,ny
+	      do 500 i=1,nxv
+	         q(i,j)=q(i,j)+qm*dns(kk)*qs(i,j,kk)
+500         continue
+400      continue
+100   continue
+      return
+      end
+
+
+
+
+      subroutine dposti(part,q,nop,idimp,idimv,nx,ny,nxv)
+c for 2d code, this subroutine calculates particle charge density
+c using second-order spline interpolation, periodic boundaries
+c charge density is approximated by values at the nearest grid points
+c q(n,m)=qm*(.75-dx**2)*(.75-dy**2)
+c q(n+1,m)=.5*qm*((.5+dx)**2)*(.75-dy**2)
+c q(n-1,m)=.5*qm*((.5-dx)**2)*(.75-dy**2)
+c q(n,m+1)=.5*qm*(.75-dx**2)*(.5+dy)**2
+c q(n+1,m+1)=.25*qm*((.5+dx)**2)*(.5+dy)**2
+c q(n-1,m+1)=.25*qm*((.5-dx)**2)*(.5+dy)**2
+c q(n,m-1)=.5*qm*(.75-dx**2)*(.5-dy)**2
+c q(n+1,m-1)=.25*qm*((.5+dx)**2)*(.5-dy)**2
+c q(n-1,m-1)=.25*qm*((.5-dx)**2)*(.5-dy)**2
+c where n,m = nearest grid points and dx = x-n, dy = y-m
+c part(1,n) = position x of particle n
+c part(2,n) = position y of particle n
+c q(j,k) = charge density at grid point j,k
+c qm = charge on particle, in units of e
+c nop = number of particles
+c nx/ny = system length in x/y direction
+c nxv = first dimension of field arrays, must be >= nx
+c scalar version
+      implicit double precision (a-h,o-z)
+      dimension part(idimv,nop),q(nxv,ny)
+c find interpolation weights
+      do 10 j = 1, nop
+         nn = part(1,j) + .5D0
+         dxl = part(1,j) - dfloat(nn)
+         nn = nn + 1
+         if (nn.gt.nx) nn = nn - nx
+         amx = .75D0 - dxl*dxl
+         np = nn + 1
+         if (np.gt.nx) np = np - nx
+         dxp = .5D0*(.5D0 + dxl)**2
+         nl = nn - 1
+         if (nl.lt.1) nl = nl + nx
+         dxl = .5D0*(.5D0 - dxl)**2
+         mm = part(2,j) + .5D0
+         dyl = part(2,j) - dfloat(mm)
+         mm = mm + 1
+         if (mm.gt.ny) mm = mm - ny
+         amy = .75D0 - dyl*dyl
+         mp = mm + 1
+         if (mp.gt.ny) mp = mp - ny
+         dyp = .5D0*(.5D0 + dyl)**2
+         ml = mm - 1
+         if (ml.lt.1) ml = ml + ny
+         dyl = .5D0*(.5D0 - dyl)**2
+c deposit charge
+         q(nn,mm) = q(nn,mm) + amx*amy
+         q(np,mm) = q(np,mm) + dxp*amy
+         q(nl,mm) = q(nl,mm) + dxl*amy
+         q(nn,mp) = q(nn,mp) + amx*dyp
+         q(np,mp) = q(np,mp) + dxp*dyp
+         q(nl,mp) = q(nl,mp) + dxl*dyp
+         q(nn,ml) = q(nn,ml) + amx*dyl
+         q(np,ml) = q(np,ml) + dxp*dyl
+         q(nl,ml) = q(nl,ml) + dxl*dyl
+   10 continue
+      return
+      end
+
+
+ 
+      subroutine pois2(q,fx,fy,isign,ffc,ax,ay,affp,wp,nx,ny,nxv,nyhd)
+c this subroutine solves 2d poisson's equation in fourier space for
+c force/charge (or convolution of electric field over particle shape)
+c with periodic boundary conditions.  equation used is:
+c fx(kx,ky) = -sqrt(-1)*kx*g(kx,ky)*s(kx,ky),
+c fy(kx,ky) = -sqrt(-1)*ky*g(kx,ky)*s(kx,ky),
+c where kx = 2pi*j/nx, ky = 2pi*k/ny, and j,k = fourier mode numbers,
+c g(kx,ky) = (affp/(kx**2+ky**2))*s(kx,ky),
+c s(kx,ky) = exp(-((kx*ax)**2+(ky*ay)**2)/2), except for
+c fx(kx=pi) = fy(kx=pi) = fx(ky=pi) = fy(ky=pi) = 0, and
+c fx(kx=0,ky=0) = fy(kx=0,ky=0) = 0.
+c cmplx(q(2*j-1,k),q(2*j,k)) = complex charge density
+c for fourier mode (j-1,k-1)
+c cmplx(fx(2*j-1,k),fx(2*j,k)) = x component of complex force/charge,
+c cmplx(fy(2*j-1,k),fy(2*j,k)) = y component of complex force/charge,
+c for fourier mode (j-1,k-1)
+c if isign = 0, form factor array is prepared
+c if isign is not equal to 0, force/charge is calculated.
+c ffc(2*j,k) = finite-size particle shape factor s
+c for fourier mode (j-1,k-1)
+c ffc(2*j-1,k) = potential green's function g for fourier mode (j-1,k-1)
+c ax/ay = half-width of particle in x/y direction
+c affp = normalization constant = nx*ny/np, where np=number of particles
+c electric field energy is also calculated, using
+c wp = nx*ny*sum((affp/(kx**2+ky**2))*|q(kx,ky)*s(kx,ky)|**2)
+c nx/ny = system length in x/y direction
+c nxv = first dimension of field arrays, must be >= nx
+c nyhd = second dimension of form factor array, must be >= nyh
+      implicit double precision (a-h,o-z)
+      implicit integer*4 (i-n)
+      dimension q(nxv,ny), fx(nxv,ny), fy(nxv,ny)
+      dimension ffc(nxv,nyhd)
+      nxh = nx/2
+      nyh = ny/2
+      ny2 = ny + 2
+      dnx = 6.28318530717959D0/float(nx)
+      dny = 6.28318530717959D0/float(ny)
+      if (isign.ne.0) go to 30
+c prepare form factor array
+      do 20 k = 1, nyh
+      dky = dny*float(k - 1)
+      at1 = dky*dky
+      at2 = (dky*ay)**2
+      do 10 j = 1, nxh
+      dkx = dnx*float(j - 1)
+      at3 = dkx*dkx + at1
+      if (at3.eq.0.0D0) then
+         ffc(2*j,k) = 1.0D0
+         ffc(2*j-1,k) = 0.0D0
+      else
+         ffc(2*j,k) = exp(-.5D0*((dkx*ax)**2 + at2))
+         ffc(2*j-1,k) = affp*ffc(2*j,k)/at3
+      endif
+   10 continue
+   20 continue
+      return
+c calculate force/charge and sum field energy
+   30 wp = 0.0D0
+c mode numbers 0 < kx < nx/2 and 0 < ky < ny/2
+      do 50 k = 2, nyh
+      k1 = ny2 -k
+      dky = dny*float(k - 1)
+      do 40 j = 2, nxh
+      at1 = ffc(2*j-1,k)*ffc(2*j,k)
+      at2 = dnx*float(j - 1)*at1
+      at3 = dky*at1
+      fx(2*j-1,k) = at2*q(2*j,k)
+      fx(2*j,k) = -at2*q(2*j-1,k)
+      fx(2*j-1,k1) = at2*q(2*j,k1)
+      fx(2*j,k1) = -at2*q(2*j-1,k1)
+      fy(2*j-1,k) = at3*q(2*j,k)
+      fy(2*j,k) = -at3*q(2*j-1,k)
+      fy(2*j-1,k1) = -at3*q(2*j,k1)
+      fy(2*j,k1) = at3*q(2*j-1,k1)
+      wp=wp+at1*(q(2*j-1,k)**2+q(2*j,k)**2+q(2*j-1,k1)**2+q(2*j,k1)**2)
+   40 continue
+   50 continue
+c mode numbers kx = 0, nx/2
+      do 60 k = 2, nyh
+      k1 = ny2 - k
+      at1 = ffc(1,k)*ffc(2,k)
+      at3 = dny*float(k - 1)*at1
+      fx(1,k) = 0.0D0
+      fx(2,k) = 0.0D0
+      fx(1,k1) = 0.0D0
+      fx(2,k1) = 0.0D0
+      fy(1,k) = at3*q(2,k)
+      fy(2,k) = -at3*q(1,k)
+      fy(1,k1) = 0.0D0
+      fy(2,k1) = 0.0D0
+      wp = wp + at1*(q(1,k)**2 + q(2,k)**2)
+   60 continue
+c mode numbers ky = 0, ny/2
+      k1 = nyh + 1
+      do 70 j = 1, nxh
+      at1 = ffc(2*j-1,1)*ffc(2*j,1)
+      at2 = dnx*float(j - 1)*at1
+      fx(2*j-1,1) = at2*q(2*j,1)
+      fx(2*j,1) = -at2*q(2*j-1,1)
+      fx(2*j-1,k1) = 0.0D0
+      fx(2*j,k1) = 0.0D0
+      fy(2*j-1,1) = 0.0D0
+      fy(2*j,1) = 0.0D0
+      fy(2*j-1,k1) = 0.0D0
+      fy(2*j,k1) = 0.0D0
+      wp = wp + at1*(q(2*j-1,1)**2 + q(2*j,1)**2)
+   70 continue
+      wp = affp*wp
+      return
+      end
+
+
+      subroutine push2(part,fx,fy,dns,nss,bx0,by0,qm,dt,
+     &                 idimp,idimv,nop,nx,ny,nxv,ek)
+c for 2d code, this subroutine updates particle co-ordinates and
+c velocities using leap-frog scheme in time and second-order spline
+c interpolation in space, with periodic boundary conditions.
+c equations used are:
+c vx(t+dt/2) = vx(t-dt/2) + (q/m)*fx(x(t),y(t))*dt,
+c vy(t+dt/2) = vy(t-dt/2) + (q/m)*fy(x(t),y(t))*dt,
+c where q/m is charge/mass, and
+c x(t+dt) = x(t) + vx(t+dt/2)*dt, y(t+dt) = y(t) + vy(t+dt/2)*dt
+c fx(x(t),y(t)) and fy(x(t),y(t)) are approximated by interpolation from
+c the nearest grid points:
+c fx(x,y) = (.75-dy**2)*((.75-dx**2)*fx(n,m)+(.5*(.5+dx)**2)*fx(n+1,m)+
+c (.5*(.5-dx)**2)*fx(n-1,m)) + (.5*(.5+dy)**2)*((.75-dx**2)*fx(n,m+1)+
+c (.5*(.5+dx)**2)*fx(n+1,m+1)+(.5*(.5-dx)**2)*fx(n-1,m+1)) +
+c (.5*(.5-dy)**2)*((.75-dx**2)*fx(n,m-1)+(.5*(.5+dx)**2)*fx(n+1,m-1)+
+c (.5*(.5-dx)**2)*fx(n-1,m-1))
+c fy(x,y) = (.75-dy**2)*((.75-dx**2)*fy(n,m)+(.5*(.5+dx)**2)*fy(n+1,m)+
+c (.5*(.5-dx)**2)*fy(n-1,m)) + (.5*(.5+dy)**2)*((.75-dx**2)*fy(n,m+1)+
+c (.5*(.5+dx)**2)*fy(n+1,m+1)+(.5*(.5-dx)**2)*fy(n-1,m+1)) +
+c (.5*(.5-dy)**2)*((.75-dx**2)*fy(n,m-1)+(.5*(.5+dx)**2)*fy(n+1,m-1)+
+c (.5*(.5-dx)**2)*fy(n-1,m-1))
+c where n = nearest grid point and dx = x-n
+c part(1,n) = position x of particle n
+c part(2,n) = position y of particle n
+c part(3,n) = velocity vx of particle n
+c part(4,n) = velocity vy of particle n
+c fx(j,k) = x component of force/charge at grid (j,k)
+c fy(j,k) = y component of force/charge at grid (j,k)
+c that is, convolution of electric field over particle shape
+c qtm = particle charge/mass ratio times dt
+c dt = time interval between successive calculations
+c kinetic energy/mass at time t is also calculated, using
+c ek = .125*sum((vx(t+dt/2)+vx(t-dt/2))**2+(vy(t+dt/2)+vy(t-dt/2))**2)
+c nop = number of particles
+c nx/ny = system length in x/y direction
+c nxv = first dimension of field arrays, must be >= nx
+c scalar version
+      implicit double precision (a-h,o-z)
+      dimension part(idimv,nop,nss)
+      dimension fx(nxv,ny),fy(nxv,ny),dns(nss),suu(nss)
+	qtm=0.5d0*qm*dt
+      zero = 0.D0
+      anx = dfloat(nx)
+      any = dfloat(ny)
+	ek=0.0d0
+	do 100 kk=1,nss
+	   suu(kk)=0.0d0
+         do 10 j = 1, nop
+c find interpolation weights
+            nn = part(1,j,kk) + .5D0
+            dx = part(1,j,kk) - dfloat(nn)
+            nn = nn + 1
+            if (nn.gt.nx) nn = nn - nx
+            amx = .75D0 - dx*dx
+            np = nn + 1
+            if (np.gt.nx) np = np - nx
+            dxp = .5D0*(.5D0 + dx)**2
+            nl = nn - 1
+            if (nl.lt.1) nl = nl + nx
+            dxl = .5D0*(.5D0 - dx)**2
+            mm = part(2,j,kk) + .5D0
+            dy = part(2,j,kk) - float(mm)
+            mm = mm + 1
+            if (mm.gt.ny) mm = mm - ny
+            amy = .75D0 - dy*dy
+            mp = mm + 1
+            if (mp.gt.ny) mp = mp - ny
+            dyp = .5D0*(.5D0 + dy)**2
+            ml = mm - 1
+            if (ml.lt.1) ml = ml + ny
+            dyl = .5D0*(.5D0 - dy)**2
+c find acceleration
+            dx=amy*(amx*fx(nn,mm)+dxp*fx(np,mm)+dxl*fx(nl,mm))
+     1         +dyp*(amx*fx(nn,mp)+dxp*fx(np,mp)+dxl*fx(nl,mp))
+     2         +dyl*(amx*fx(nn,ml)+dxp*fx(np,ml)+dxl*fx(nl,ml))
+            dy=amy*(amx*fy(nn,mm)+dxp*fy(np,mm)+dxl*fy(nl,mm))
+     1         +dyp*(amx*fy(nn,mp)+dxp*fy(np,mp)+dxl*fy(nl,mp))
+     2         +dyl*(amx*fy(nn,ml)+dxp*fy(np,ml)+dxl*fy(nl,ml))
+            ex=qtm*dx
+            ey=qtm*dy
+            bx=qtm*bx0
+            by=qtm*by0
+            u0=part(3,j,kk)+ex
+            v0=part(4,j,kk)+ey
+            w0=part(5,j,kk)
+            f=2.0d0/(1.0d0+bx*bx+by*by)
+            u1=f*(u0-w0*by)
+            v1=f*(v0+w0*bx)
+            w1=f*(w0+u0*by-v0*bx)
+            u0=u0-w1*by+ex
+            v0=v0+w1*bx+ey
+            w0=w0+u1*by-v1*bx
+            suu(kk)=suu(kk)+(u0+part(3,j,kk))**2+(v0+part(4,j,kk))**2
+     &             +(w0+part(5,j,kk))**2
+            part(3,j,kk) = u0
+            part(4,j,kk) = v0
+	      part(5,j,kk) = w0
+c new position
+            dx = part(1,j,kk) + u0*dt
+            dy = part(2,j,kk) + v0*dt
+c periodic boundary conditions
+            if (dx.lt.zero) dx = dx + anx
+            if (dx.ge.anx) dx = dx - anx
+            part(1,j,kk) = dx
+            if (dy.lt.zero) dy = dy + any
+            if (dy.ge.any) dy = dy - any
+            part(2,j,kk) = dy
+   10    continue
+         ek=ek+dns(kk)*suu(kk)
+100   continue
+      ek=0.125d0*ek/dfloat(nop)
+c normalize kinetic energy
+      return
+      end
+
+
+
+
+
+      subroutine pushi(part,fx,fy,bx0,by0,qm,dt,idimp,idimv,
+     &                  nop,nx,ny,nxv,ek)
+c for 2d code, this subroutine updates particle co-ordinates and
+c velocities using leap-frog scheme in time and second-order spline
+c interpolation in space, with periodic boundary conditions.
+c equations used are:
+c vx(t+dt/2) = vx(t-dt/2) + (q/m)*fx(x(t),y(t))*dt,
+c vy(t+dt/2) = vy(t-dt/2) + (q/m)*fy(x(t),y(t))*dt,
+c where q/m is charge/mass, and
+c x(t+dt) = x(t) + vx(t+dt/2)*dt, y(t+dt) = y(t) + vy(t+dt/2)*dt
+c fx(x(t),y(t)) and fy(x(t),y(t)) are approximated by interpolation from
+c the nearest grid points:
+c fx(x,y) = (.75-dy**2)*((.75-dx**2)*fx(n,m)+(.5*(.5+dx)**2)*fx(n+1,m)+
+c (.5*(.5-dx)**2)*fx(n-1,m)) + (.5*(.5+dy)**2)*((.75-dx**2)*fx(n,m+1)+
+c (.5*(.5+dx)**2)*fx(n+1,m+1)+(.5*(.5-dx)**2)*fx(n-1,m+1)) +
+c (.5*(.5-dy)**2)*((.75-dx**2)*fx(n,m-1)+(.5*(.5+dx)**2)*fx(n+1,m-1)+
+c (.5*(.5-dx)**2)*fx(n-1,m-1))
+c fy(x,y) = (.75-dy**2)*((.75-dx**2)*fy(n,m)+(.5*(.5+dx)**2)*fy(n+1,m)+
+c (.5*(.5-dx)**2)*fy(n-1,m)) + (.5*(.5+dy)**2)*((.75-dx**2)*fy(n,m+1)+
+c (.5*(.5+dx)**2)*fy(n+1,m+1)+(.5*(.5-dx)**2)*fy(n-1,m+1)) +
+c (.5*(.5-dy)**2)*((.75-dx**2)*fy(n,m-1)+(.5*(.5+dx)**2)*fy(n+1,m-1)+
+c (.5*(.5-dx)**2)*fy(n-1,m-1))
+c where n = nearest grid point and dx = x-n
+c part(1,n) = position x of particle n
+c part(2,n) = position y of particle n
+c part(3,n) = velocity vx of particle n
+c part(4,n) = velocity vy of particle n
+c fx(j,k) = x component of force/charge at grid (j,k)
+c fy(j,k) = y component of force/charge at grid (j,k)
+c that is, convolution of electric field over particle shape
+c qtm = particle charge/mass ratio times dt
+c dt = time interval between successive calculations
+c kinetic energy/mass at time t is also calculated, using
+c ek = .125*sum((vx(t+dt/2)+vx(t-dt/2))**2+(vy(t+dt/2)+vy(t-dt/2))**2)
+c nop = number of particles
+c nx/ny = system length in x/y direction
+c nxv = first dimension of field arrays, must be >= nx
+c scalar version
+      implicit double precision (a-h,o-z)
+      dimension part(idimv,nop)
+      dimension fx(nxv,ny),fy(nxv,ny)
+	qtm=0.5d0*qm*dt
+      zero = 0.D0
+      anx = dfloat(nx)
+      any = dfloat(ny)
+	ek=0.0d0
+      do 10 j = 1, nop
+c find interpolation weights
+         nn = part(1,j) + .5D0
+         dx = part(1,j) - dfloat(nn)
+         nn = nn + 1
+         if (nn.gt.nx) nn = nn - nx
+         amx = .75D0 - dx*dx
+         np = nn + 1
+         if (np.gt.nx) np = np - nx
+         dxp = .5D0*(.5D0 + dx)**2
+         nl = nn - 1
+         if (nl.lt.1) nl = nl + nx
+         dxl = .5D0*(.5D0 - dx)**2
+         mm = part(2,j) + .5D0
+         dy = part(2,j) - float(mm)
+         mm = mm + 1
+         if (mm.gt.ny) mm = mm - ny
+         amy = .75D0 - dy*dy
+         mp = mm + 1
+         if (mp.gt.ny) mp = mp - ny
+         dyp = .5D0*(.5D0 + dy)**2
+         ml = mm - 1
+         if (ml.lt.1) ml = ml + ny
+         dyl = .5D0*(.5D0 - dy)**2
+c find acceleration
+         dx=amy*(amx*fx(nn,mm)+dxp*fx(np,mm)+dxl*fx(nl,mm))
+     1      +dyp*(amx*fx(nn,mp)+dxp*fx(np,mp)+dxl*fx(nl,mp))
+     2      +dyl*(amx*fx(nn,ml)+dxp*fx(np,ml)+dxl*fx(nl,ml))
+         dy=amy*(amx*fy(nn,mm)+dxp*fy(np,mm)+dxl*fy(nl,mm))
+     1      +dyp*(amx*fy(nn,mp)+dxp*fy(np,mp)+dxl*fy(nl,mp))
+     2      +dyl*(amx*fy(nn,ml)+dxp*fy(np,ml)+dxl*fy(nl,ml))
+         ex=qtm*dx
+         ey=qtm*dy
+         bx=qtm*bx0
+         by=qtm*by0
+         u0=part(3,j)+ex
+         v0=part(4,j)+ey
+         w0=part(5,j)
+         f=2.0d0/(1.0d0+bx*bx+by*by)
+         u1=f*(u0-w0*by)
+         v1=f*(v0+w0*bx)
+         w1=f*(w0+u0*by-v0*bx)
+         u0=u0-w1*by+ex
+         v0=v0+w1*bx+ey
+         w0=w0+u1*by-v1*bx
+         ek=ek+(u0+part(3,j))**2+(v0+part(4,j))**2
+     &           +(w0+part(5,j))**2
+         part(3,j) = u0
+         part(4,j) = v0
+	   part(5,j) = w0
+c new position
+         dx = part(1,j) + u0*dt
+         dy = part(2,j) + v0*dt
+c periodic boundary conditions
+         if (dx.lt.zero) dx = dx + anx
+         if (dx.ge.anx) dx = dx - anx
+         part(1,j) = dx
+         if (dy.lt.zero) dy = dy + any
+         if (dy.ge.any) dy = dy - any
+         part(2,j) = dy
+   10 continue
+      ek=0.125d0*ek/dfloat(nop)
+c normalize kinetic energy
+      return
+      end
+
+
+
+
+
+      subroutine fft2rx(f,isign,mixup,sct,indx,indy,nxhd,nyd,
+     &                  nxhyd,nxyhd)
+c this subroutine performs a two dimensional real to complex fast
+c fourier transform and its inverse, using complex arithmetic
+c f = input and output data
+c indx/indy = exponent which determines length in x/y direction,
+c where nx=2**indx, ny=2**indy
+c if isign = 0, the fft tables are prepared
+c if isign = -1, an inverse fourier transform is performed
+c f(n,m) = (1/nx*ny)*sum(f(j,k)*
+c       exp(-sqrt(-1)*2pi*n*j/nx)*exp(-sqrt(-1)*2pi*m*k/ny))
+c if isign = 1, a forward fourier transform is performed
+c f(j,k) = sum(f(n,m)*exp(sqrt(-1)*2pi*n*j/nx)*exp(sqrt(-1)*2pi*m*k/ny))
+c mixup = array of bit reversed addresses
+c sct = sine/cosine table
+c nxhd = first dimension of f
+c nyd = second dimension of f
+c nxhyd = maximum of (nx/2,ny)
+c nxyhd = maximum of (nx,ny)/2
+c fourier coefficients are stored as follows:
+c f(2*j-1,k),f(2*j,k) = real, imaginary part of mode j-1,k-1, where
+c 1 <= j <= nx/2 and 1 <= k <= ny, except for
+c f(1,k),f(2,k) = real, imaginary part of mode nx/2,k-1, where
+c ny/2+2 <= k <= ny, and
+c f(2,1) = real part of mode nx/2,0 and
+c f(2,ny/2+1) = real part of mode nx/2,ny/2
+c written by viktor k. decyk, ucla
+      implicit double precision (a-h,o-z)
+      complex*16 f, sct, t1, t2, t3
+      dimension f(nxhd,nyd), mixup(nxhyd), sct(nxyhd)
+      indx1 = indx - 1
+      indx1y = max0(indx1,indy)
+      nx = 2**indx
+      nxh = nx/2
+      nxhh = nx/4
+      nxh2 = nxh + 2
+      ny = 2**indy
+      nyh = ny/2
+      ny2 = ny + 2
+      nxy = max0(nx,ny)
+      nxhy = 2**indx1y
+      if (isign) 50, 10, 220
+c prepare fft tables
+c bit-reverse index table: mixup(j) = 1 + reversed bits of (j - 1)
+   10 do 30 j = 1, nxhy
+      lb = j - 1
+      ll = 0
+      do 20 k = 1, indx1y
+      jb = lb/2
+      it = lb - 2*jb
+      lb = jb
+      ll = 2*ll + it
+   20 continue
+      mixup(j) = ll + 1
+   30 continue
+c sine/cosine table for the angles 2*n*pi/nxy
+      nxyh = nxy/2
+      dnxy = 6.28318530717959D0/float(nxy)
+      do 40 j = 1, nxyh
+      arg = dnxy*float(j - 1)
+      sct(j) = dcmplx(cos(arg),-sin(arg))
+   40 continue
+      return
+c inverse fourier transform
+c bit-reverse array elements in x
+   50 nrx = nxhy/nxh
+      nry = nxhy/ny
+      do 70 j = 1, nxh
+      j1 = (mixup(j) - 1)/nrx + 1
+      if (j.ge.j1) go to 70
+      do 60 k = 1, ny
+      t1 = f(j1,k)
+      f(j1,k) = f(j,k)
+      f(j,k) = t1
+   60 continue
+   70 continue
+c first transform in x
+      nrx = nxy/nxh
+      do 110 l = 1, indx1
+      ns = 2**(l - 1)
+      ns2 = ns + ns
+      km = nxhh/ns
+      kmr = km*nrx
+      do 100 k = 1, km
+      k1 = ns2*(k - 1)
+      k2 = k1 + ns
+      do 90 j = 1, ns
+      j1 = j + k1
+      j2 = j + k2
+      t1 = sct(1+kmr*(j-1))
+      do 80 i = 1, ny
+      t2 = t1*f(j2,i)
+      f(j2,i) = f(j1,i) - t2
+      f(j1,i) = f(j1,i) + t2
+   80 continue
+   90 continue
+  100 continue
+  110 continue
+c unscramble coefficients and normalize
+      kmr = nxy/nx
+      ani = 1.D0/float(2*nx*ny)
+      do 130 j = 2, nxhh
+      t3 =dcmplx(dimag(sct(1+kmr*(j-1))),-dble(sct(1+kmr*(j-1))))
+      do 120 k = 1, ny
+      t2 =dconjg(f(nxh2-j,k))
+      t1 = f(j,k) + t2
+      t2 = (f(j,k) - t2)*t3
+      f(j,k) = ani*(t1 + t2)
+      f(nxh2-j,k) = ani*dconjg(t1 - t2)
+  120 continue
+  130 continue
+      ani = 2.0D0*ani
+      do 140 k = 1, ny
+      f(nxhh+1,k) = ani*dconjg(f(nxhh+1,k))
+      f(1,k) = ani*dcmplx(dble(f(1,k)) + dimag(f(1,k)),dble(f(1,k))-dim
+     1ag(f(1,k)))
+  140 continue
+c bit-reverse array elements in y
+      do 160 k = 1, ny
+      k1 = (mixup(k) - 1)/nry + 1
+      if (k.ge.k1) go to 160
+      do 150 j = 1, nxh
+      t1 = f(j,k1)
+      f(j,k1) = f(j,k)
+      f(j,k) = t1
+  150 continue
+  160 continue
+c then transform in y
+      nry = nxy/ny
+      do 200 l = 1, indy
+      ns = 2**(l - 1)
+      ns2 = ns + ns
+      km = nyh/ns
+      kmr = km*nry
+      do 190 k = 1, km
+      k1 = ns2*(k - 1)
+      k2 = k1 + ns
+      do 180 j = 1, ns
+      j1 = j + k1
+      j2 = j + k2
+      t1 = sct(1+kmr*(j-1))
+      do 170 i = 1, nxh
+      t2 = t1*f(i,j2)
+      f(i,j2) = f(i,j1) - t2
+      f(i,j1) = f(i,j1) + t2
+  170 continue
+  180 continue
+  190 continue
+  200 continue
+c unscramble modes kx = 0, nx/2
+      do 210 k = 2, nyh
+      t1 = f(1,ny2-k)
+      f(1,ny2-k) = .5D0*dcmplx(dimag(f(1,k) + t1),dble(f(1,k) - t1))
+      f(1,k) = .5D0*dcmplx(dble(f(1,k) + t1),dimag(f(1,k) - t1))
+  210 continue
+      return
+c forward fourier transform
+c scramble modes kx = 0, nx/2
+  220 do 230 k = 2, nyh
+      t1=dcmplx(dimag(f(1,ny2-k)),dble(f(1,ny2-k)))
+      f(1,ny2-k) =dconjg(f(1,k) - t1)
+      f(1,k) = f(1,k) + t1
+  230 continue
+c bit-reverse array elements in y
+      nry = nxhy/ny
+      do 250 k = 1, ny
+      k1 = (mixup(k) - 1)/nry + 1
+      if (k.ge.k1) go to 250
+      do 240 j = 1, nxh
+      t1 = f(j,k1)
+      f(j,k1) = f(j,k)
+      f(j,k) = t1
+  240 continue
+  250 continue
+c first transform in y
+      nry = nxy/ny
+      do 290 l = 1, indy
+      ns = 2**(l - 1)
+      ns2 = ns + ns
+      km = nyh/ns
+      kmr = km*nry
+      do 280 k = 1, km
+      k1 = ns2*(k - 1)
+      k2 = k1 + ns
+      do 270 j = 1, ns
+      j1 = j + k1
+      j2 = j + k2
+      t1 =dconjg(sct(1+kmr*(j-1)))
+      do 260 i = 1, nxh
+      t2 = t1*f(i,j2)
+      f(i,j2) = f(i,j1) - t2
+      f(i,j1) = f(i,j1) + t2
+  260 continue
+  270 continue
+  280 continue
+  290 continue
+c scramble coefficients
+      kmr = nxy/nx
+      do 310 j = 2, nxhh
+      t3 =dcmplx(dimag(sct(1+kmr*(j-1))),dble(sct(1+kmr*(j-1))))
+      do 300 k = 1, ny
+      t2 = dconjg(f(nxh2-j,k))
+      t1 = f(j,k) + t2
+      t2 = (f(j,k) - t2)*t3
+      f(j,k) = t1 + t2
+      f(nxh2-j,k) =dconjg(t1 - t2)
+  300 continue
+  310 continue
+      do 320 k = 1, ny
+      f(nxhh+1,k) = 2.D0*dconjg(f(nxhh+1,k))
+      f(1,k) =dcmplx(dble(f(1,k))+dimag(f(1,k)),dble(f(1,k))-dimag(f
+     1(1,k)))
+  320 continue
+c bit-reverse array elements in x
+      nrx = nxhy/nxh
+      do 340 j = 1, nxh
+      j1 = (mixup(j) - 1)/nrx + 1
+      if (j.ge.j1) go to 340
+      do 330 k = 1, ny
+      t1 = f(j1,k)
+      f(j1,k) = f(j,k)
+      f(j,k) = t1
+  330 continue
+  340 continue
+c then transform in x
+      nrx = nxy/nxh
+      do 380 l = 1, indx1
+      ns = 2**(l - 1)
+      ns2 = ns + ns
+      km = nxhh/ns
+      kmr = km*nrx
+      do 370 k = 1, km
+      k1 = ns2*(k - 1)
+      k2 = k1 + ns
+      do 360 j = 1, ns
+      j1 = j + k1
+      j2 = j + k2
+      t1 =dconjg(sct(1+kmr*(j-1)))
+      do 350 i = 1, ny
+      t2 = t1*f(j2,i)
+      f(j2,i) = f(j1,i) - t2
+      f(j1,i) = f(j1,i) + t2
+  350 continue
+  360 continue
+  370 continue
+  380 continue
+      return
+      end
+
+
+      function ranorm(d)
+c this program calculates a random number y from a gaussian distribution
+c with zero mean and unit variance, according to the method of
+c mueller and box:
+c    y(k) = (-2*ln(x(k)))**1/2*sin(2*pi*x(k+1))
+c    y(k+1) = (-2*ln(x(k)))**1/2*cos(2*pi*x(k+1)),
+c where x is a random number uniformly distributed on (0,1).
+c written for the ibm by viktor k. decyk, ucla
+      integer r1,r2,r4,r5
+      double precision ranorm,h1l,h1u,h2l,r0,r3,asc,bsc,temp,d
+      save iflg,r1,r2,r4,r5,h1l,h1u,h2l,r0
+      data r1,r2,r4,r5 /885098780,1824280461,1396483093,55318673/
+      data h1l,h1u,h2l /65531.0d0,32767.0d0,65525.0d0/
+      data iflg,r0 /0,0.0d0/
+      if (iflg.eq.0) go to 10
+      ranorm = r0
+      r0 = 0.0d0
+      iflg = 0
+      return
+   10 isc = 65536
+      asc = dfloat(isc)
+      bsc = asc*asc
+      i1 = r1 - (r1/isc)*isc
+      r3 = h1l*dfloat(r1) + asc*h1u*dfloat(i1)
+      i1 = r3/bsc
+      r3 = r3 - dfloat(i1)*bsc
+      bsc = 0.5d0*bsc
+      i1 = r2/isc
+      isc = r2 - i1*isc
+      r0 = h1l*dfloat(r2) + asc*h1u*dfloat(isc)
+      asc = 1.0d0/bsc
+      isc = r0*asc
+      r2 = r0 - dfloat(isc)*bsc
+      r3 = r3 + (dfloat(isc) + 2.0d0*h1u*dfloat(i1))
+      isc = r3*asc
+      r1 = r3 - dfloat(isc)*bsc
+      temp = dsqrt(-2.0d0*dlog((dfloat(r1) + dfloat(r2)*asc)*asc))
+      isc = 65536
+      asc = dfloat(isc)
+      bsc = asc*asc
+      i1 = r4 - (r4/isc)*isc
+      r3 = h2l*dfloat(r4) + asc*h1u*dfloat(i1)
+      i1 = r3/bsc
+      r3 = r3 - dfloat(i1)*bsc
+      bsc = 0.5d0*bsc
+      i1 = r5/isc
+      isc = r5 - i1*isc
+      r0 = h2l*dfloat(r5) + asc*h1u*dfloat(isc)
+      asc = 1.0d0/bsc
+      isc = r0*asc
+      r5 = r0 - dfloat(isc)*bsc
+      r3 = r3 + (dfloat(isc) + 2.0d0*h1u*dfloat(i1))
+      isc = r3*asc
+      r4 = r3 - dfloat(isc)*bsc
+      r0 = 6.28318530717959d0*((dfloat(r4) + dfloat(r5)*asc)*asc)
+      ranorm = temp*dsin(r0)
+      r0 = temp*dcos(r0)
+      iflg = 1
+      return
+      end
+
+ 
